@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+images/
+.*_cache.json
