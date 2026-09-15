@@ -147,6 +147,15 @@ def find_unit_info(course_data, unit_id):
 
     obj = objects.get(unit_id)
     if not obj:
+        videos = course.get("videos", {})
+        if unit_id in videos:
+            return {
+                "title": videos[unit_id].get("title", "Untitled"),
+                "page_slug": None,
+                "section_title": "",
+                "unit_idx": 0,
+                "type": "ivideo",
+            }
         return None
 
     section_id = obj.get("courseSection", "")
