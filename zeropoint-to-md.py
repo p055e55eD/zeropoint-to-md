@@ -71,7 +71,8 @@ def build_cookie_header(lw_tokens_value):
     raw = lw_tokens_value.strip()
     if raw.startswith("lw_tokens="):
         raw = raw[len("lw_tokens="):]
-    return f"lw_tokens={urllib.parse.quote(raw, safe='')}"
+    decoded = urllib.parse.unquote(raw)
+    return f"lw_tokens={urllib.parse.quote(decoded, safe='')}"
 
 
 def extract_access_token(lw_tokens_value):
@@ -87,13 +88,29 @@ def extract_access_token(lw_tokens_value):
         return raw
 
 
+class _CookieRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Preserve Cookie header across redirects (stdlib drops it)."""
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new_req = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new_req is not None and req.has_header("Cookie"):
+            new_req.add_unredirected_header("Cookie", req.get_header("Cookie"))
+        return new_req
+
+
 def fetch(url, cookie_header):
     req = urllib.request.Request(url)
     req.add_header("Cookie", cookie_header)
     req.add_header("User-Agent", USER_AGENT)
     req.add_header("Accept", "text/html,application/json")
-    with urllib.request.urlopen(req) as resp:
-        return resp.read().decode("utf-8")
+    opener = urllib.request.build_opener(_CookieRedirectHandler)
+    try:
+        with opener.open(req) as resp:
+            return resp.read().decode("utf-8")
+    except urllib.error.HTTPError as e:
+        print(f"  Request URL: {url}")
+        print(f"  Final URL:   {e.url}")
+        print(f"  Status:      {e.code} {e.reason}")
+        raise
 
 
 def fetch_binary(url):
@@ -322,7 +339,10 @@ def main():
     print(f"Section: {info['section_title']}")
     print(f"Unit:    {info['title']}")
 
-    ebook_url = f"{BASE_URL}/ebook/{info['page_slug']}?preview"
+    ebook_url = (
+        f"{BASE_URL}/ebook/{info['page_slug']}"
+        f"?preview&access_token={access_token}"
+    )
     print("Downloading unit content...")
     html_content = fetch(ebook_url, cookie_header)
 
