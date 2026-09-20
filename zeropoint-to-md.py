@@ -12,6 +12,7 @@ Usage:
 """
 
 import argparse
+import html
 import json
 import os
 import re
@@ -23,6 +24,24 @@ import urllib.request
 
 from bs4 import BeautifulSoup
 import html2text
+
+CODEMIRROR_LANGS = {
+    "text/x-c++src": "cpp",
+    "text/x-csrc": "c",
+    "text/x-csharp": "csharp",
+    "text/x-python": "python",
+    "text/x-java": "java",
+    "text/javascript": "javascript",
+    "application/json": "json",
+    "text/x-powershell": "powershell",
+    "text/x-sh": "bash",
+    "text/x-go": "go",
+    "text/x-rustsrc": "rust",
+    "text/x-yaml": "yaml",
+    "text/x-sql": "sql",
+    "text/html": "html",
+    "text/css": "css",
+}
 
 BASE_URL = "https://www.zeropointsecurity.co.uk"
 USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0"
@@ -58,6 +77,12 @@ def parse_args():
         "-o", "--output",
         default=".",
         help="Output directory for the markdown file (default: current directory).",
+    )
+    parser.add_argument(
+        "--dump-html",
+        action="store_true",
+        default=False,
+        help="Save raw ebook HTML to a file for debugging.",
     )
     return parser.parse_args()
 
@@ -227,6 +252,42 @@ def download_image(img_url, image_dir):
         return None
 
 
+def extract_code_blocks(soup, html_content):
+    """Extract code-block components from pageState JSON.
+
+    Returns a dict of {marker: fenced_code} to be spliced back in
+    after html2text runs (which would flatten the newlines).
+    """
+    m = re.search(r'var pageState=({.*?});\s*</script>', html_content, re.DOTALL)
+    if not m:
+        return {}
+    try:
+        page_state = json.loads(m.group(1))
+    except json.JSONDecodeError:
+        return {}
+
+    code_map = {}
+    components = page_state.get("components", {})
+    for comp_id, comp in components.items():
+        if comp.get("componentType") != "code-block":
+            continue
+        code = comp.get("code", "")
+        if not code:
+            continue
+        code = html.unescape(code)
+        mode = comp.get("options", {}).get("mode", "")
+        lang = CODEMIRROR_LANGS.get(mode, "")
+
+        placeholder = soup.find(id=comp_id)
+        if not placeholder:
+            continue
+        marker = f"CODEBLOCK_{rand_id(16)}"
+        code_map[marker] = f"\n```{lang}\n{code}\n```\n"
+        placeholder.replace_with(marker)
+
+    return code_map
+
+
 def html_to_md(html_content, local_images, image_dir):
     """Convert ebook HTML to clean markdown."""
     soup = BeautifulSoup(html_content, "html.parser")
@@ -239,6 +300,8 @@ def html_to_md(html_content, local_images, image_dir):
         content = soup.find("body")
     if not content:
         return title, html_content, 0
+
+    code_map = extract_code_blocks(soup, html_content)
 
     for tag in content.find_all(["script", "style", "nav", "header", "footer"]):
         tag.decompose()
@@ -265,6 +328,8 @@ def html_to_md(html_content, local_images, image_dir):
     h.unicode_snob = True
 
     md = h.handle(str(content))
+    for marker, fenced in code_map.items():
+        md = md.replace(marker, fenced)
     md = re.sub(r"\n{4,}", "\n\n\n", md)
     md = md.strip()
 
@@ -345,6 +410,12 @@ def main():
     )
     print("Downloading unit content...")
     html_content = fetch(ebook_url, cookie_header)
+
+    if args.dump_html:
+        dump_path = os.path.join(args.output, f"debug-{unit_id}.html")
+        with open(dump_path, "w") as f:
+            f.write(html_content)
+        print(f"Debug HTML saved: {dump_path}")
 
     image_dir = args.image_dir
     if not os.path.isabs(image_dir):
