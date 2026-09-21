@@ -12,6 +12,7 @@ Usage:
 """
 
 import argparse
+import base64
 import html
 import json
 import os
@@ -290,6 +291,94 @@ def extract_code_blocks(soup, html_content):
     return code_map
 
 
+RISE_CDN = "https://articulateusercontent.com"
+
+
+def _fetch_rise_content(iframe_url):
+    """Fetch structured content from a Rise 360 interactive embed."""
+    base = iframe_url.rsplit("/", 1)[0]
+    try:
+        data = fetch_json_raw(f"{base}/runtime-data.js")
+    except Exception:
+        return None
+
+    m = re.search(r'__jsonp\([^,]+,\s*"([^"]+)"\)', data)
+    if not m:
+        return None
+    try:
+        decoded = base64.b64decode(m.group(1)).decode("utf-8")
+        return json.loads(decoded)
+    except Exception:
+        return None
+
+
+def _rise_description_to_text(desc_html):
+    """Convert a Rise hotspot description HTML to plain text."""
+    s = BeautifulSoup(desc_html, "html.parser")
+    return s.get_text(separator="\n").strip()
+
+
+def fetch_json_raw(url):
+    req = urllib.request.Request(url)
+    req.add_header("User-Agent", USER_AGENT)
+    with urllib.request.urlopen(req) as resp:
+        return resp.read().decode("utf-8")
+
+
+def extract_embed_images(soup, image_dir):
+    """Replace Rise 360 iframe embeds with their main image and hotspot content."""
+    img_count = 0
+    for div in soup.find_all("div", attrs={"data-node-type": "embed"}):
+        iframe = div.find("iframe")
+        if not iframe or not iframe.get("src"):
+            continue
+        course_data = _fetch_rise_content(iframe["src"])
+        if not course_data:
+            continue
+
+        lessons = course_data.get("course", {}).get("lessons", [])
+        for lesson in lessons:
+            for item in lesson.get("items", []):
+                main_img_key = item.get("media", {}).get("image", {}).get("key")
+                if main_img_key:
+                    local_name = download_image(f"{RISE_CDN}/{main_img_key}", image_dir)
+                    if local_name:
+                        img_tag = soup.new_tag("img", src=local_name)
+                        div.insert_before(img_tag)
+                        div.insert_before(soup.new_tag("br"))
+                        img_count += 1
+
+                for hotspot in item.get("items", []):
+                    title = hotspot.get("title", "")
+                    desc = hotspot.get("description", "")
+                    hs_img_key = hotspot.get("media", {}).get("image", {}).get("key")
+
+                    if not title and not desc:
+                        continue
+
+                    heading = soup.new_tag("h3")
+                    heading.string = title
+                    div.insert_before(heading)
+
+                    if hs_img_key:
+                        local_name = download_image(f"{RISE_CDN}/{hs_img_key}", image_dir)
+                        if local_name:
+                            img_tag = soup.new_tag("img", src=local_name)
+                            div.insert_before(img_tag)
+                            div.insert_before(soup.new_tag("br"))
+                            img_count += 1
+
+                    if desc:
+                        text = _rise_description_to_text(desc)
+                        if text:
+                            p = soup.new_tag("p")
+                            p.string = text
+                            div.insert_before(p)
+
+        div.decompose()
+    return img_count
+
+
 def html_to_md(html_content, local_images, image_dir):
     """Convert ebook HTML to clean markdown."""
     soup = BeautifulSoup(html_content, "html.parser")
@@ -304,11 +393,12 @@ def html_to_md(html_content, local_images, image_dir):
         return title, html_content, 0
 
     code_map = extract_code_blocks(soup, html_content)
+    embed_img_count = extract_embed_images(soup, image_dir)
 
     for tag in content.find_all(["script", "style", "nav", "header", "footer"]):
         tag.decompose()
 
-    img_count = 0
+    img_count = embed_img_count
     for img in content.find_all("img"):
         src = img.get("src", "")
         if not src:
