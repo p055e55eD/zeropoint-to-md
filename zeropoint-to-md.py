@@ -268,6 +268,8 @@ def extract_code_blocks(soup, html_content):
 
     code_map = {}
     components = page_state.get("components", {})
+    if isinstance(components, list):
+        components = {c.get("componentId", ""): c for c in components if isinstance(c, dict)}
     for comp_id, comp in components.items():
         if comp.get("componentType") != "code-block":
             continue
