@@ -192,12 +192,27 @@ def find_unit_info(course_data, unit_id):
     if not obj:
         videos = course.get("videos", {})
         if unit_id in videos:
+            video = videos[unit_id]
+            section_title = ""
+            unit_idx = 0
+            for sid, sdata in sections.items():
+                for j, u in enumerate(sdata.get("learningPath", [])):
+                    if u.get("id") == unit_id:
+                        section_title = sdata.get("title", sid)
+                        unit_idx = j + 1
+                        break
+                if section_title:
+                    break
             return {
-                "title": videos[unit_id].get("title", "Untitled"),
+                "title": video.get("title", "Untitled"),
                 "page_slug": None,
-                "section_title": "",
-                "unit_idx": 0,
+                "section_title": section_title,
+                "unit_idx": unit_idx,
                 "type": "ivideo",
+                "video_source": video.get("type", ""),
+                "video_id": video.get("sourceid", ""),
+                "duration": video.get("duration", 0),
+                "video_headings": video.get("videoHeadings", {}).get("headingsData", {}),
             }
         return None
 
@@ -251,6 +266,65 @@ def download_image(img_url, image_dir):
     except Exception as e:
         print(f"  Warning: failed to download image: {e}")
         return None
+
+
+def download_wistia_video(source_id, output_dir, filename):
+    """Download a Wistia video at the best available quality."""
+    url = f"https://fast.wistia.com/embed/medias/{source_id}.json"
+    try:
+        data = fetch_json(url)
+    except Exception as e:
+        print(f"  Error fetching video metadata: {e}")
+        return None
+
+    assets = data.get("media", {}).get("assets", [])
+    preferred = ["hd_mp4_video", "md_mp4_video", "original", "mp4_video"]
+    best = None
+    for pref in preferred:
+        for a in assets:
+            if a.get("type") == pref and a.get("url"):
+                best = a
+                break
+        if best:
+            break
+    if not best:
+        for a in assets:
+            if a.get("contentType", "").startswith("video/") and a.get("url"):
+                best = a
+                break
+    if not best:
+        print("  Error: no downloadable video asset found.")
+        return None
+
+    video_url = best["url"]
+    quality = best.get("type", "unknown")
+    width = best.get("width", "?")
+    height = best.get("height", "?")
+    print(f"  Quality: {quality} ({width}x{height})")
+
+    os.makedirs(output_dir, exist_ok=True)
+    ext = ".mp4" if "mp4" in best.get("contentType", "mp4") else ".bin"
+    filepath = os.path.join(output_dir, filename + ext)
+
+    print(f"  Downloading to {filepath}...")
+    req = urllib.request.Request(video_url)
+    req.add_header("User-Agent", USER_AGENT)
+    with urllib.request.urlopen(req) as resp:
+        total = int(resp.headers.get("Content-Length", 0))
+        downloaded = 0
+        with open(filepath, "wb") as f:
+            while True:
+                chunk = resp.read(1024 * 256)
+                if not chunk:
+                    break
+                f.write(chunk)
+                downloaded += len(chunk)
+                if total:
+                    pct = downloaded * 100 // total
+                    print(f"\r  {downloaded // 1024 // 1024}MB / {total // 1024 // 1024}MB ({pct}%)", end="", flush=True)
+        if total:
+            print()
+    return filepath
 
 
 def extract_code_blocks(soup, html_content):
@@ -483,18 +557,46 @@ def main():
         print(f"Error: unit {unit_id} not found in course data.")
         sys.exit(1)
 
-    if not info["page_slug"]:
-        unit_type = info["type"]
-        print(f"Unit '{info['title']}' is type '{unit_type}' — no text content to download.")
-        if unit_type == "ivideo":
-            print("  (This is a video unit)")
-        elif unit_type == "lti":
-            print("  (This is a lab unit)")
-        sys.exit(1)
-
     print(f"Course:  {course_id}")
     print(f"Section: {info['section_title']}")
     print(f"Unit:    {info['title']}")
+
+    if not info["page_slug"]:
+        unit_type = info["type"]
+        if unit_type == "ivideo":
+            video_id = info.get("video_id", "")
+            video_source = info.get("video_source", "")
+            if video_source == "wistia" and video_id:
+                duration = info.get("duration", 0)
+                mins, secs = divmod(int(duration), 60)
+                print(f"Type:    Video ({mins}m{secs:02d}s)")
+                section_dir = os.path.join(args.output, info["section_title"]) if info["section_title"] else args.output
+                filename = f"{info['unit_idx']:02d}-{slugify(info['title'])}"
+                path = download_wistia_video(video_id, section_dir, filename)
+                if path:
+                    headings = info.get("video_headings", {})
+                    if headings:
+                        sorted_h = sorted(headings.values(), key=lambda h: h.get("seekTime", 0))
+                        print("  Chapters:")
+                        for h in sorted_h:
+                            t = h.get("seekTime", 0) // 1000
+                            m, s = divmod(t, 60)
+                            print(f"    {m}:{s:02d} - {h.get('title', '')}")
+                    print(f"Saved: {path}")
+                    print("Finished!")
+                else:
+                    print("Video download failed.")
+                    sys.exit(1)
+            else:
+                print(f"  Video type '{video_source}' is not supported yet.")
+                sys.exit(1)
+            sys.exit(0)
+        elif unit_type == "lti":
+            print(f"Unit '{info['title']}' is a lab unit — no downloadable content.")
+            sys.exit(1)
+        else:
+            print(f"Unit '{info['title']}' is type '{unit_type}' — no text content to download.")
+            sys.exit(1)
 
     ebook_url = (
         f"{BASE_URL}/ebook/{info['page_slug']}"
