@@ -191,8 +191,14 @@ def find_unit_info(course_data, unit_id):
     obj = objects.get(unit_id)
     if not obj:
         videos = course.get("videos", {})
-        if unit_id in videos:
-            video = videos[unit_id]
+        video = videos.get(unit_id)
+        if not video:
+            # Fallback: search videos by their 'id' field in case dict keys don't match
+            for vdata in videos.values():
+                if vdata.get("id") == unit_id:
+                    video = vdata
+                    break
+        if video:
             section_title = ""
             unit_idx = 0
             for sid, sdata in sections.items():
@@ -212,7 +218,7 @@ def find_unit_info(course_data, unit_id):
                 "video_source": video.get("type", ""),
                 "video_id": video.get("sourceid", ""),
                 "duration": video.get("duration", 0),
-                "video_headings": video.get("videoHeadings", {}).get("headingsData", {}),
+                "video_headings": (video.get("videoHeadings") or {}).get("headingsData", {}),
             }
         return None
 
